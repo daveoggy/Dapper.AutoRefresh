@@ -9,27 +9,54 @@ using System.Threading.Tasks;
 
 namespace Dapper.AutoRefresh
 {
-    public class SqlAutoRefresh<TReturn>
+    public class SqlAutoRefresh<TReturn> : IDisposable
     {
         private readonly string _sqlQuery;
         private readonly string _connectionString;
         private readonly CancellationToken _cancellationToken;
+        private readonly object _param;
+        private readonly IDbTransaction _transaction;
+        private readonly int? _commandTimeout;
+        private readonly CommandType? _commandType;
         private readonly SqlDependencyAsync _sqlDependencyAsync;
 
-        public SqlAutoRefresh(string sqlQuery, string connectionString)
-        {
-            _sqlQuery = sqlQuery;
-            _connectionString = connectionString;
-            _cancellationToken = CancellationToken.None;
-            _sqlDependencyAsync = new SqlDependencyAsync(_cancellationToken);
-        }
-
-        public SqlAutoRefresh(string sqlQuery, string connectionString, CancellationToken cancellationToken)
+        public SqlAutoRefresh(string sqlQuery, 
+            string connectionString, 
+            CancellationToken cancellationToken,
+            object param = null, 
+            IDbTransaction transaction = null, 
+            int? commandTimeout = null,
+            CommandType? commandType = null)
         {
             _sqlQuery = sqlQuery;
             _connectionString = connectionString;
             _cancellationToken = cancellationToken;
+            _param = param;
+            _transaction = transaction;
+            _commandTimeout = commandTimeout;
+            _commandType = commandType;
             _sqlDependencyAsync = new SqlDependencyAsync(_cancellationToken);
+
+            SqlDependency.Start(_connectionString);
+        }
+
+        public SqlAutoRefresh(string sqlQuery, 
+            string connectionString,
+            object param = null, 
+            IDbTransaction transaction = null, 
+            int? commandTimeout = null,
+            CommandType? commandType = null)
+        {
+            _sqlQuery = sqlQuery;
+            _connectionString = connectionString;
+            _cancellationToken = CancellationToken.None;
+            _param = param;
+            _transaction = transaction;
+            _commandTimeout = commandTimeout;
+            _commandType = commandType;
+            _sqlDependencyAsync = new SqlDependencyAsync(_cancellationToken);
+
+            SqlDependency.Start(_connectionString);
         }
 
         public async Task<ICollection<TReturn>> GetLatest()
@@ -46,9 +73,8 @@ namespace Dapper.AutoRefresh
                     using (var sqlConnection = new SqlConnection(_connectionString))
                     using (var connection = new SqlConnectionWithDependency(sqlConnection, _sqlDependencyAsync.SqlDependency))
                     {
-                        // Dapper uses an array for the results when not setting buffered=true; which we aren't
-                        collection = await connection.QueryAsync<TReturn>(_sqlQuery, _cancellationToken)
-                            as ICollection<TReturn>;
+                        collection = await connection.QueryAsync<TReturn>(_sqlQuery, _param, _transaction, _commandTimeout,_commandType) 
+                            as ICollection<TReturn>; // Dapper uses an array for the results when not setting buffered=true; which we aren't
 
                         return collection;
                     }
@@ -63,6 +89,11 @@ namespace Dapper.AutoRefresh
             }
 
             return collection;
+        }
+
+        public void Dispose()
+        {
+            SqlDependency.Stop(_connectionString);
         }
 
         /// <summary>
