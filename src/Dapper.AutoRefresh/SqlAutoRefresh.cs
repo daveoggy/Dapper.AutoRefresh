@@ -18,7 +18,10 @@ namespace Dapper.AutoRefresh
         private readonly IDbTransaction _transaction;
         private readonly int? _commandTimeout;
         private readonly CommandType? _commandType;
+        private readonly IDapperAdapter _dapperAdapter;
+        private readonly ISqlDependencyAdapterFactory _sqlDependencyAdapterFactory;
         private readonly SqlDependencyAsync _sqlDependencyAsync;
+        private IDbConnectionFactory _dbConnectionFactory;
 
         public SqlAutoRefresh(string sqlQuery, 
             string connectionString, 
@@ -35,7 +38,7 @@ namespace Dapper.AutoRefresh
             _transaction = transaction;
             _commandTimeout = commandTimeout;
             _commandType = commandType;
-            _sqlDependencyAsync = new SqlDependencyAsync(_cancellationToken);
+            //_sqlDependencyAsync = new SqlDependencyAsync(_cancellationToken);
 
             SqlDependency.Start(_connectionString);
         }
@@ -45,7 +48,10 @@ namespace Dapper.AutoRefresh
             object param = null, 
             IDbTransaction transaction = null, 
             int? commandTimeout = null,
-            CommandType? commandType = null)
+            CommandType? commandType = null,
+            ISqlDependencyAdapterFactory sqlDependencyAdapterFactory = null,
+            IDbConnectionFactory dbConnectionFactory = null,
+            IDapperAdapter dapperAdapter = null)
         {
             _sqlQuery = sqlQuery;
             _connectionString = connectionString;
@@ -54,9 +60,10 @@ namespace Dapper.AutoRefresh
             _transaction = transaction;
             _commandTimeout = commandTimeout;
             _commandType = commandType;
-            _sqlDependencyAsync = new SqlDependencyAsync(_cancellationToken);
-
-            SqlDependency.Start(_connectionString);
+            _dapperAdapter = dapperAdapter ?? new DapperAdapter();
+            _sqlDependencyAdapterFactory = sqlDependencyAdapterFactory ?? new SqlDependencyAdapterFactory();
+            _sqlDependencyAsync = new SqlDependencyAsync(_connectionString, _sqlDependencyAdapterFactory, _cancellationToken);
+            _dbConnectionFactory = dbConnectionFactory ?? new DbConnectionFactory();
         }
 
         public async Task<ICollection<TReturn>> GetLatest()
@@ -70,11 +77,17 @@ namespace Dapper.AutoRefresh
 
                     _cancellationToken.ThrowIfCancellationRequested();
 
-                    using (var sqlConnection = new SqlConnection(_connectionString))
-                    using (var connection = new SqlConnectionWithDependency(sqlConnection, _sqlDependencyAsync.SqlDependency))
+                    using (var connection = _dbConnectionFactory.Create(_connectionString, _sqlDependencyAsync.SqlDependency))
                     {
-                        collection = await connection.QueryAsync<TReturn>(_sqlQuery, _param, _transaction, _commandTimeout,_commandType) 
-                            as ICollection<TReturn>; // Dapper uses an array for the results when not setting buffered=true; which we aren't
+                        collection = await _dapperAdapter.QueryAsync<TReturn>(
+                            connection, 
+                            _sqlQuery, 
+                            _param, 
+                            _transaction, 
+                            _commandTimeout,
+                            _commandType) 
+                            as ICollection<TReturn>; 
+                        // Dapper uses an array for the results when not setting buffered=true; which we aren't
 
                         return collection;
                     }
@@ -96,18 +109,19 @@ namespace Dapper.AutoRefresh
             SqlDependency.Stop(_connectionString);
         }
 
+        /// <inheritdoc cref="DbConnection" />
         /// <summary>
-        /// The sole purpose is to intercept the <see cref="DbConnection.CreateDbCommand()"/> call
-        /// and associate it with the <see cref="SqlDependency"/> before Dapper executes the command
+        /// The sole purpose is to intercept the <see cref="M:System.Data.Common.DbConnection.CreateDbCommand" /> call
+        /// and associate it with the <see cref="T:System.Data.SqlClient.SqlDependency" /> before Dapper executes the command
         /// </summary>
         private class SqlConnectionWithDependency : DbConnection
         {
             private readonly SqlConnection _sqlConnection;
-            private readonly SqlDependency _sqlDependency;
+            private readonly ISqlDependencyAdapter _sqlDependency;
 
-            public SqlConnectionWithDependency(SqlConnection sqlConnection, SqlDependency sqlDependency)
+            public SqlConnectionWithDependency(string connectionString, ISqlDependencyAdapter sqlDependency)
             {
-                _sqlConnection = sqlConnection;
+                _sqlConnection = new SqlConnection(connectionString);
                 _sqlDependency = sqlDependency;
             }
 
@@ -133,8 +147,8 @@ namespace Dapper.AutoRefresh
 
             public override string ConnectionString
             {
-                get { return _sqlConnection.ConnectionString; }
-                set { _sqlConnection.ConnectionString = value; }
+                get => _sqlConnection.ConnectionString;
+                set => _sqlConnection.ConnectionString = value;
             }
 
             public override string Database => _sqlConnection.Database;
@@ -153,16 +167,32 @@ namespace Dapper.AutoRefresh
             }
         }
 
+        private class DbConnectionFactory : IDbConnectionFactory
+        {
+            #region Implementation of IDbConnectionFactory
+
+            public IDbConnection Create(string connectionString, ISqlDependencyAdapter sqlDependencyAdapter)
+            {
+                return new SqlConnectionWithDependency(connectionString, sqlDependencyAdapter);
+            }
+
+            #endregion
+        }
+
         private class SqlDependencyAsync : INotifyCompletion
         {
+            private readonly string _connectionString;
+            private readonly ISqlDependencyAdapterFactory _sqlDependencyAdapterFactory;
             private Action _continuation;
 
-            public SqlDependencyAsync(CancellationToken cancellationToken)
+            public SqlDependencyAsync(string connectionString, ISqlDependencyAdapterFactory sqlDependencyAdapterFactory, CancellationToken cancellationToken)
             {
+                _connectionString = connectionString;
+                _sqlDependencyAdapterFactory = sqlDependencyAdapterFactory;
                 cancellationToken.Register(() => OnChangeHandler(null, null));
             }
 
-            public SqlDependency SqlDependency { get; private set; }
+            public ISqlDependencyAdapter SqlDependency { get; private set; }
 
             // ReSharper disable once UnusedMethodReturnValue.Local
             // Used via reflection
@@ -203,7 +233,10 @@ namespace Dapper.AutoRefresh
 
             public void GetResult()
             {
-                SqlDependency = new SqlDependency();
+                // GetResult is called after IsCompleted returns true. 
+                // Elvis makes sure the first call to IsCompleted is true.
+                // Subsequent calls are dependent on SqlDependency
+                SqlDependency = _sqlDependencyAdapterFactory.Create(_connectionString);
             }
 
             public void Reset()
