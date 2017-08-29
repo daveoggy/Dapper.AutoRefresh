@@ -21,27 +21,27 @@ namespace Dapper.AutoRefresh
         private readonly IDapperAdapter _dapperAdapter;
         private readonly ISqlDependencyAdapterFactory _sqlDependencyAdapterFactory;
         private readonly SqlDependencyAsync _sqlDependencyAsync;
-        private IDbConnectionFactory _dbConnectionFactory;
+        private readonly IDbConnectionFactory _dbConnectionFactory;
 
-        public SqlAutoRefresh(string sqlQuery, 
-            string connectionString, 
-            CancellationToken cancellationToken,
-            object param = null, 
-            IDbTransaction transaction = null, 
-            int? commandTimeout = null,
-            CommandType? commandType = null)
-        {
-            _sqlQuery = sqlQuery;
-            _connectionString = connectionString;
-            _cancellationToken = cancellationToken;
-            _param = param;
-            _transaction = transaction;
-            _commandTimeout = commandTimeout;
-            _commandType = commandType;
-            //_sqlDependencyAsync = new SqlDependencyAsync(_cancellationToken);
+        //public SqlAutoRefresh(string sqlQuery, 
+        //    string connectionString, 
+        //    CancellationToken cancellationToken,
+        //    object param = null, 
+        //    IDbTransaction transaction = null, 
+        //    int? commandTimeout = null,
+        //    CommandType? commandType = null)
+        //{
+        //    _sqlQuery = sqlQuery;
+        //    _connectionString = connectionString;
+        //    _cancellationToken = cancellationToken;
+        //    _param = param;
+        //    _transaction = transaction;
+        //    _commandTimeout = commandTimeout;
+        //    _commandType = commandType;
+        //    //_sqlDependencyAsync = new SqlDependencyAsync(_cancellationToken);
 
-            SqlDependency.Start(_connectionString);
-        }
+        //    SqlDependency.Start(_connectionString);
+        //}
 
         public SqlAutoRefresh(string sqlQuery, 
             string connectionString,
@@ -49,6 +49,7 @@ namespace Dapper.AutoRefresh
             IDbTransaction transaction = null, 
             int? commandTimeout = null,
             CommandType? commandType = null,
+            CancellationToken? cancellationToken = null,
             ISqlDependencyAdapterFactory sqlDependencyAdapterFactory = null,
             IDbConnectionFactory dbConnectionFactory = null,
             IDapperAdapter dapperAdapter = null)
@@ -60,6 +61,7 @@ namespace Dapper.AutoRefresh
             _transaction = transaction;
             _commandTimeout = commandTimeout;
             _commandType = commandType;
+            _cancellationToken = cancellationToken ?? CancellationToken.None;
             _dapperAdapter = dapperAdapter ?? new DapperAdapter();
             _sqlDependencyAdapterFactory = sqlDependencyAdapterFactory ?? new SqlDependencyAdapterFactory();
             _sqlDependencyAsync = new SqlDependencyAsync(_connectionString, _sqlDependencyAdapterFactory, _cancellationToken);
@@ -79,14 +81,17 @@ namespace Dapper.AutoRefresh
 
                     using (var connection = _dbConnectionFactory.Create(_connectionString, _sqlDependencyAsync.SqlDependency))
                     {
-                        collection = await _dapperAdapter.QueryAsync<TReturn>(
-                            connection, 
+                        var commandDefinition = new CommandDefinition(
                             _sqlQuery, 
                             _param, 
                             _transaction, 
-                            _commandTimeout,
-                            _commandType) 
-                            as ICollection<TReturn>; 
+                            _commandTimeout, 
+                            _commandType, 
+                            cancellationToken: _cancellationToken);
+
+                        collection = await _dapperAdapter
+                            .QueryAsync<TReturn>(connection, commandDefinition)
+                            as ICollection<TReturn>;
                         // Dapper uses an array for the results when not setting buffered=true; which we aren't
 
                         return collection;
@@ -203,6 +208,8 @@ namespace Dapper.AutoRefresh
 
             private void OnChangeHandler(object _, SqlNotificationEventArgs e)
             {
+                SqlDependency.OnChange -= OnChangeHandler;
+
                 if (e.Source == SqlNotificationSource.Timeout)
                 {
                     throw new TimeoutException();
@@ -217,9 +224,7 @@ namespace Dapper.AutoRefresh
                 Console.WriteLine("Notification Info: " + e.Info);
                 Console.WriteLine("Notification source: " + e.Source);
                 Console.WriteLine("Notification type: " + e.Type);
-
-                SqlDependency.OnChange -= OnChangeHandler;
-
+                
                 _continuation();
             }
 

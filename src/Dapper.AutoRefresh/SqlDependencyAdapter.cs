@@ -16,7 +16,7 @@ namespace Dapper.AutoRefresh
         public SqlDependencyAdapter(string connectionString)
         {
             _connectionString = connectionString;
-            if (ActiveConnections.ContainsKey(_connectionString))
+            if (!ActiveConnections.ContainsKey(_connectionString))
             {
                 SqlDependency.Start(_connectionString);
             }

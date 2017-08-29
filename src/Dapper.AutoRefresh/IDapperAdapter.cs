@@ -13,5 +13,7 @@ namespace Dapper.AutoRefresh
             IDbTransaction transaction,
             int? commandTimeout,
             CommandType? commandType);
+
+        Task<IEnumerable<TReturn>> QueryAsync<TReturn>(IDbConnection connection, CommandDefinition commandDefinition);
     }
 }
